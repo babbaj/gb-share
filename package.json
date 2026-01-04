@@ -1,0 +1,13 @@
+{
+  "name": "cloudflare-worker-bundled",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "vite build",
+    "deploy": "npm run build && wrangler deploy"
+  },
+  "devDependencies": {
+    "vite": "^7.3.0",
+    "wrangler": "^4.54.0"
+  }
+}
