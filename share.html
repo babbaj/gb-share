@@ -180,8 +180,8 @@
         </div>
         <div id="media-container"></div>
     </div>
-    <script>
-    async function meow() {
+
+    <script type="module">
     const $ = id => document.getElementById(id);
 
     function parseHash() {
@@ -211,7 +211,6 @@
         return await response.json()
     }
 
-
     const required = ['name', 'url', 'key', 'offset', 'length', 'size', 'sha256', 'cmp'];
     let params;
     if (window.location.hash) {
@@ -223,7 +222,6 @@
     } else {
         params = await parseAndRequestShortURL();
     }
-    console.log(params);
 
     const missing = required.filter(k => !(k in params));
     if (missing.length > 0) {
@@ -365,7 +363,7 @@
         }, 1000);
     }
 
-    const downloadUrl = '/gb-download?id=' + encodeURIComponent(expectedSha256);
+    const downloadUrl = './gb-download?id=' + encodeURIComponent(expectedSha256);
 
     function sendParamsToServiceWorker() {
         navigator.serviceWorker.controller?.postMessage({
@@ -452,7 +450,7 @@
             throw new Error('Service Workers not supported');
         }
 
-        const registration = await navigator.serviceWorker.register('./share-sw.js');
+        const registration = await navigator.serviceWorker.register('share-sw.js');
 
         if (registration.installing) {
             await new Promise(resolve => {
@@ -569,8 +567,6 @@
             }
         })();
     }
-    }
-    meow();
     </script>
 </body>
 </html>
