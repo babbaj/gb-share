@@ -124,8 +124,10 @@ async function getSignature(secretKey, dateStamp, region, stringToSign) {
   return Array.from(signature).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-import share from "./share.html?raw"
-import service from "./share-sw.js?raw"
+import share from "./share.html"
+import service from "./share-sw.js.txt"
+import zstdJs from "./zstd.js.txt"
+import zstdWasm from "./zstd.wasm.bin"
 
 export default {
   async fetch(request, env, ctx) {
@@ -166,21 +168,24 @@ export default {
           }
 
           const path = url.pathname.slice(1); // remove leading "/"
+          if (path === "zstd/zstd.js") {
+            return new Response(zstdJs, { headers: { 'Content-Type': "application/javascript; charset=utf-8" }})
+          }
+          if (path === "zstd/zstd.wasm") {
+            return new Response(new Uint8Array(zstdWasm), { headers: { 'Content-Type': "application/wasm" }})
+          }
           if (path === "share-sw.js") {
             return new Response(service,  { headers: {
               'Content-Type': "application/javascript; charset=utf-8",
               'Content-Length': String(share.length)
               //'Cache-Control': 'public, max-age=3600'
             }});
-          } else {
-            return new Response(share,  { headers: {
-              'Content-Type': "text/html; charset=utf-8",
-              'Content-Length': String(share.length)
-              //'Cache-Control': 'public, max-age=3600'
-            }});
           }
-
-
+          return new Response(share,  { headers: {
+            'Content-Type': "text/html; charset=utf-8",
+            'Content-Length': String(share.length)
+            //'Cache-Control': 'public, max-age=3600'
+          }});
       } catch (e) {
           console.error("Crash:", e);
           return new Response(String(e), { status: 500 });
