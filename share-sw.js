@@ -1,3 +1,5 @@
+console.log('Service worker loaded v3');
+
 // Load dependencies with SRI verification
 // (importScripts doesn't support integrity, so we fetch + verify + eval via blob URL)
 const dependencies = [
@@ -20,7 +22,6 @@ const zstdWasm = {
     url: 'zstd/zstd.wasm',
     integrity: 'sha384-Wu2F+8X9C4paG5l9Zp/TMb/hJhIX0rB9bIsxZmdqixBwdIymHYS3RQognZWsAk0I'
 };
-
 
 async function loadZstdWasm() {
     let code, wasmBinary;
@@ -328,6 +329,117 @@ function createHashAndProgressTransform(expectedSha256) {
     });
 }
 
+// Creates a ReadableStream that fetches a byte range and automatically resumes on error
+function createResumableFetchStream(url, startByte, endByte, maxRetries = 5) {
+    let currentOffset = startByte;
+    let consecutiveErrors = 0;
+    let currentReader = null;
+    let cancelled = false;
+
+    async function* generateChunks() {
+        while (currentOffset <= endByte) {
+            if (cancelled) {
+                console.log('Stream cancelled, stopping generator');
+                return;
+            }
+            try {
+                const response = await fetch(url, {
+                    headers: { 'Range': `bytes=${currentOffset}-${endByte}` }
+                });
+
+                if (!response.ok && response.status !== 206) {
+                    // Don't retry client errors (4xx) except 429
+                    if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+                        throw new Error(`HTTP ${response.status} (not retryable)`);
+                    }
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+                currentReader = response.body.getReader();
+                consecutiveErrors = 0; // Reset on successful connect
+
+                while (true) {
+                    if (cancelled) {
+                        console.log('Stream cancelled during read');
+                        return;
+                    }
+                    const { done, value } = await currentReader.read();
+                    if (done) return; // Successfully finished
+                    currentOffset += value.byteLength;
+                    yield value;
+                }
+            } catch (e) {
+                if (cancelled) {
+                    console.log('Stream cancelled, ignoring error:', e.message);
+                    return;
+                }
+                console.log(`Fetch error at offset ${currentOffset}, retry ${consecutiveErrors + 1}/${maxRetries}:`, e.message);
+                consecutiveErrors++;
+                if (consecutiveErrors >= maxRetries || e.message.includes('not retryable')) {
+                    throw e;
+                }
+                // Exponential backoff: 200ms, 400ms, 800ms, 1600ms, 3200ms
+                await new Promise(r => setTimeout(r, 200 * Math.pow(2, consecutiveErrors - 1)));
+                // Loop continues with updated currentOffset
+            }
+        }
+    }
+
+    const generator = generateChunks();
+    return new ReadableStream({
+        async pull(controller) {
+            if (cancelled) return;
+            try {
+                const { done, value } = await generator.next();
+                if (cancelled) return; // Check again after await
+                if (done) {
+                    controller.close();
+                } else {
+                    controller.enqueue(value);
+                }
+            } catch (e) {
+                if (cancelled) return; // Ignore errors after cancellation
+                console.error('Stream pull error:', e);
+                controller.error(e);
+            }
+        },
+        cancel(reason) {
+            console.log('Stream cancel called:', reason);
+            cancelled = true;
+            // Return a promise that always resolves - swallow any errors from cancelling the reader
+            return Promise.resolve(currentReader?.cancel()).catch(() => {});
+        }
+    });
+}
+
+// Wraps a stream to gracefully handle cancellation without throwing errors
+function createCancellationSafeStream(sourceStream) {
+    let reader = null;
+    let cancelled = false;
+    return new ReadableStream({
+        async pull(controller) {
+            if (!reader) reader = sourceStream.getReader();
+            if (cancelled) return;
+            try {
+                const { done, value } = await reader.read();
+                if (cancelled) return;
+                if (done) {
+                    controller.close();
+                } else {
+                    controller.enqueue(value);
+                }
+            } catch (e) {
+                if (cancelled) return;
+                controller.error(e);
+            }
+        },
+        cancel(reason) {
+            cancelled = true;
+            return Promise.resolve(reader?.cancel()).catch(() => {});
+        }
+    });
+}
+
 function parseRangeHeader(rangeHeader, totalSize) {
     // Parse "bytes=start-end" or "bytes=start-" or "bytes=-suffix"
     const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
@@ -361,51 +473,57 @@ self.addEventListener('fetch', (event) => {
 
     const id = url.searchParams.get('id');
     const p = id ? downloadParamsMap.get(id) : null;
-    if (!p) return;
+    if (!p) {
+        console.log('No params for id:', id, 'map has:', [...downloadParamsMap.keys()]);
+        return;
+    }
 
     const isMediaPlayback = url.searchParams.get('media') === 'true';
     const canSeek = (p.compression === '' || p.compression === 'none');
     const rangeHeader = event.request.headers.get('Range');
+
+    console.log('Fetch:', isMediaPlayback ? 'media' : 'download', 'Range:', rangeHeader, 'canSeek:', canSeek);
 
     // Handle Range request for uncompressed files
     if (canSeek && rangeHeader) {
         const range = parseRangeHeader(rangeHeader, p.size);
         if (range) {
             event.respondWith((async () => {
-                await depsLoaded;
-                const keyBytes = hexToBytes(p.key);
+                try {
+                    await depsLoaded;
+                    const keyBytes = hexToBytes(p.key);
 
-                // Calculate the byte range in the encrypted blob
-                const blobStart = p.offset + range.start;
-                const blobEnd = p.offset + range.end;
-                const rangeLength = range.end - range.start + 1;
+                    // Calculate the byte range in the encrypted blob
+                    const blobStart = p.offset + range.start;
+                    const blobEnd = p.offset + range.end;
+                    const rangeLength = range.end - range.start + 1;
 
-                // Align to AES block boundary
-                const alignedStart = Math.floor(blobStart / 16) * 16;
-                const skipBytes = blobStart - alignedStart;
-                const fetchEnd = blobEnd;
+                    // Align to AES block boundary
+                    const alignedStart = Math.floor(blobStart / 16) * 16;
+                    const skipBytes = blobStart - alignedStart;
+                    const fetchEnd = blobEnd;
 
-                const s3Range = 'bytes=' + alignedStart + '-' + fetchEnd;
-                const s3Response = await fetch(p.url, {
-                    headers: { 'Range': s3Range }
-                });
+                    const s3Stream = createResumableFetchStream(p.url, alignedStart, fetchEnd);
 
-                if (!s3Response.ok && s3Response.status !== 206) {
-                    return new Response('S3 fetch failed: ' + s3Response.status, { status: 502 });
+                    const pipelineStream = s3Stream
+                        .pipeThrough(createDecryptTransform(keyBytes, blobStart))
+                        .pipeThrough(createLengthLimitTransform(rangeLength));
+
+                    // Wrap in cancellation-safe stream for Firefox compatibility
+                    const stream = createCancellationSafeStream(pipelineStream);
+
+                    const headers = new Headers({
+                        'Content-Type': getMimeType(p.filename),
+                        'Content-Range': `bytes ${range.start}-${range.end}/${p.size}`,
+                        'Content-Length': String(rangeLength),
+                        'Accept-Ranges': 'bytes'
+                    });
+
+                    return new Response(stream, { status: 206, headers });
+                } catch (e) {
+                    console.error('Range request error:', e);
+                    return new Response('Range request failed: ' + e.message, { status: 502 });
                 }
-
-                const stream = s3Response.body
-                    .pipeThrough(createDecryptTransform(keyBytes, blobStart))
-                    .pipeThrough(createLengthLimitTransform(rangeLength));
-
-                const headers = new Headers({
-                    'Content-Type': getMimeType(p.filename),
-                    'Content-Range': `bytes ${range.start}-${range.end}/${p.size}`,
-                    'Content-Length': String(rangeLength),
-                    'Accept-Ranges': 'bytes'
-                });
-
-                return new Response(stream, { status: 206, headers });
             })());
             return;
         }
@@ -413,53 +531,53 @@ self.addEventListener('fetch', (event) => {
 
     // Full file request (or compressed file)
     event.respondWith((async () => {
-        await depsLoaded;
-        const keyBytes = hexToBytes(p.key);
-        const offset = p.offset;
-        const length = p.length;
-        const alignedOffset = Math.floor(offset / 16) * 16;
-        const remainingSeek = offset % 16;
-        const fetchLength = length + remainingSeek;
+        try {
+            await depsLoaded;
+            const keyBytes = hexToBytes(p.key);
+            const offset = p.offset;
+            const length = p.length;
+            const alignedOffset = Math.floor(offset / 16) * 16;
+            const remainingSeek = offset % 16;
+            const fetchLength = length + remainingSeek;
 
-        const s3RangeHeader = 'bytes=' + alignedOffset + '-' + (alignedOffset + fetchLength - 1);
-        const s3Response = await fetch(p.url, {
-            headers: { 'Range': s3RangeHeader }
-        });
+            const fetchEndByte = alignedOffset + fetchLength - 1;
+            const s3Stream = createResumableFetchStream(p.url, alignedOffset, fetchEndByte);
 
-        if (!s3Response.ok && s3Response.status !== 206) {
-            return new Response('S3 fetch failed: ' + s3Response.status, { status: 502 });
+            let stream = s3Stream
+                .pipeThrough(createDecryptTransform(keyBytes, offset))
+                .pipeThrough(createLengthLimitTransform(length));
+
+            if (p.compression === 'zstd') {
+                stream = stream.pipeThrough(createZstdDecompressTransform());
+            }
+
+            // Only track progress/hash for actual downloads, not media playback
+            if (!isMediaPlayback) {
+                stream = stream.pipeThrough(createHashAndProgressTransform(p.sha256));
+            }
+
+            const headers = new Headers({
+                'Content-Type': getMimeType(p.filename),
+                'Content-Length': String(p.size)
+            });
+
+            // Only set Content-Disposition for downloads, not media playback
+            if (!isMediaPlayback) {
+                // RFC 5987 encoding for non-ASCII filenames
+                const encodedFilename = encodeURIComponent(p.filename).replace(/'/g, '%27');
+                headers.set('Content-Disposition', `attachment; filename*=UTF-8''${encodedFilename}`);
+            }
+
+            if (canSeek) {
+                headers.set('Accept-Ranges', 'bytes');
+            }
+
+            // Wrap in cancellation-safe stream for Firefox compatibility
+            return new Response(createCancellationSafeStream(stream), { headers });
+        } catch (e) {
+            console.error('Full file request error:', e);
+            return new Response('Request failed: ' + e.message, { status: 502 });
         }
-
-        let stream = s3Response.body
-            .pipeThrough(createDecryptTransform(keyBytes, offset))
-            .pipeThrough(createLengthLimitTransform(length));
-
-        if (p.compression === 'zstd') {
-            stream = stream.pipeThrough(createZstdDecompressTransform());
-        }
-
-        // Only track progress/hash for actual downloads, not media playback
-        if (!isMediaPlayback) {
-            stream = stream.pipeThrough(createHashAndProgressTransform(p.sha256));
-        }
-
-        const headers = new Headers({
-            'Content-Type': getMimeType(p.filename),
-            'Content-Length': String(p.size)
-        });
-
-        // Only set Content-Disposition for downloads, not media playback
-        if (!isMediaPlayback) {
-            // RFC 5987 encoding for non-ASCII filenames
-            const encodedFilename = encodeURIComponent(p.filename).replace(/'/g, '%27');
-            headers.set('Content-Disposition', `attachment; filename*=UTF-8''${encodedFilename}`);
-        }
-
-        if (canSeek) {
-            headers.set('Accept-Ranges', 'bytes');
-        }
-
-        return new Response(stream, { headers });
     })());
 });
 

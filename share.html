@@ -402,12 +402,26 @@
 
     const mediaUrl = downloadUrl + '&media=true';
 
+    function handleMediaError(mediaEl, mediaType) {
+        const error = mediaEl.error;
+        // MEDIA_ERR_NETWORK = 2, MEDIA_ERR_DECODE = 3
+        if (error && (error.code === 2 || error.code === 3)) {
+            console.error(`${mediaType} error:`, error.code, error.message);
+            // Show reload prompt and auto-reload after 2 seconds
+            showStatus(`Playback interrupted (network error). Reloading...`, 'error');
+            setTimeout(() => {
+                window.location.reload();
+            }, 2000);
+        }
+    }
+
     function showMediaPlayer() {
         if (isVideo) {
             const video = document.createElement('video');
             video.controls = true;
             video.preload = 'metadata';
             video.src = mediaUrl;
+            video.onerror = () => handleMediaError(video, 'Video');
             $('media-container').appendChild(video);
             $('media-container').style.display = 'block';
         } else if (isAudio) {
@@ -415,6 +429,7 @@
             audio.controls = true;
             audio.preload = 'metadata';
             audio.src = mediaUrl;
+            audio.onerror = () => handleMediaError(audio, 'Audio');
             $('media-container').appendChild(audio);
             $('media-container').style.display = 'block';
         } else if (isImage) {
