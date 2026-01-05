@@ -25,11 +25,13 @@ const zstdWasm = {
 async function loadZstdWasm() {
     let code, wasmBinary;
     if (typeof ZSTD_IS_BUNDLED !== 'undefined' && ZSTD_IS_BUNDLED) {
-        console.log('try to use bundled zstd');
         code = atob(ZSTD_JS_BASE64);
-        // TODO: use fromBase64 if available
-        wasmBinary = Uint8Array.from(atob(ZSTD_WASM_BASE64), c => c.charCodeAt(0)).buffer;
-        console.log('bundled zstd worked');
+        const base64 = ZSTD_WASM_BASE64;
+        if (typeof Uint8Array.fromBase64 === 'function') {
+            wasmBinary = Uint8Array.fromBase64(base64).buffer;
+        } else {
+            wasmBinary = Uint8Array.from(atob(base64), c => c.charCodeAt(0)).buffer;
+        }
     } else {
         // Fetch both files in parallel with integrity verification
         const [jsResponse, wasmResponse] = await Promise.all([
