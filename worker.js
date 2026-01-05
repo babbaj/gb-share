@@ -126,8 +126,6 @@ async function getSignature(secretKey, dateStamp, region, stringToSign) {
 
 import share from "./share.html"
 import service from "./share-sw.js.txt"
-//import zstdJs from "./zstd.js.txt"
-//import zstdWasm from "./zstd.wasm.bin"
 
 export default {
   async fetch(request, env, ctx) {
@@ -168,16 +166,6 @@ export default {
           }
 
           const path = url.pathname.slice(1); // remove leading "/"
-          /*if (path === "zstd/zstd.js") {
-            return new Response(zstdJs, { headers: {
-              'Content-Type': "application/javascript; charset=utf-8"
-            }})
-          }
-          if (path === "zstd/zstd.wasm") {
-            return new Response(new Uint8Array(zstdWasm), { headers: {
-              'Content-Type': "application/wasm"
-            }})
-          }*/
           if (path === "share-sw.js") {
             return new Response(service,  { headers: {
               'Content-Type': "application/javascript; charset=utf-8",

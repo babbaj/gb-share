@@ -25,21 +25,6 @@ export default defineConfig({
             src: 'share.html',
             dest: '.'
         },
-        /*{
-          src: 'share-sw.js',
-          dest: '.',
-          rename: 'share-sw.js.txt',
-        },
-        {
-          src: 'zstd/zstd.js',
-          dest: '.',
-          rename: 'zstd.js.txt',
-        },
-        {
-          src: 'zstd/zstd.wasm',
-          dest: '.',
-          rename: 'zstd.wasm.bin'
-        }*/
       ],
     }),
   ],
